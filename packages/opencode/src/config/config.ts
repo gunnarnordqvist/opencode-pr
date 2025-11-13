@@ -24,17 +24,18 @@ export namespace Config {
   export const state = Instance.state(async () => {
     const auth = await Auth.all()
     let result = await global()
-    for (const file of ["opencode.jsonc", "opencode.json"]) {
-      const found = await Filesystem.findUp(file, Instance.directory, Instance.worktree)
-      for (const resolved of found.toReversed()) {
-        result = mergeDeep(result, await loadFile(resolved))
-      }
-    }
 
     // Override with custom config if provided
     if (Flag.OPENCODE_CONFIG) {
       result = mergeDeep(result, await loadFile(Flag.OPENCODE_CONFIG))
       log.debug("loaded custom config", { path: Flag.OPENCODE_CONFIG })
+    }
+
+    for (const file of ["opencode.jsonc", "opencode.json"]) {
+      const found = await Filesystem.findUp(file, Instance.directory, Instance.worktree)
+      for (const resolved of found.toReversed()) {
+        result = mergeDeep(result, await loadFile(resolved))
+      }
     }
 
     if (Flag.OPENCODE_CONFIG_CONTENT) {
@@ -74,12 +75,15 @@ export namespace Config {
     for (const dir of directories) {
       await assertValid(dir)
 
-      for (const file of ["opencode.jsonc", "opencode.json"]) {
-        result = mergeDeep(result, await loadFile(path.join(dir, file)))
-        // to satisy the type checker
-        result.agent ??= {}
-        result.mode ??= {}
-        result.plugin ??= []
+      if (dir.endsWith(".opencode")) {
+        for (const file of ["opencode.jsonc", "opencode.json"]) {
+          log.debug(`loading config from ${path.join(dir, file)}`)
+          result = mergeDeep(result, await loadFile(path.join(dir, file)))
+          // to satisy the type checker
+          result.agent ??= {}
+          result.mode ??= {}
+          result.plugin ??= []
+        }
       }
 
       promises.push(installDependencies(dir))
@@ -345,6 +349,43 @@ export namespace Config {
   })
   export type Command = z.infer<typeof Command>
 
+  export const ContextFilter = z
+    .object({
+      mode: z
+        .enum(["none", "summary", "filtered", "full"])
+        .optional()
+        .default("none")
+        .describe(
+          "Context mode: 'none' (no parent context), 'summary' (compact summary), 'filtered' (selective context), 'full' (all parent context)",
+        ),
+      maxTokens: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Maximum tokens to include from parent session context"),
+      maxMessages: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Maximum number of messages to include from parent session"),
+      includeToolResults: z
+        .array(z.string())
+        .optional()
+        .describe("Which tool results to include (e.g., ['read', 'edit', 'bash'])"),
+      includeMessageTypes: z
+        .array(z.enum(["user", "assistant"]))
+        .optional()
+        .describe("Which message types to include from parent session"),
+      includeFileChanges: z.boolean().optional().describe("Include file changes made in parent session"),
+    })
+    .optional()
+    .meta({
+      ref: "ContextFilterConfig",
+    })
+  export type ContextFilter = z.infer<typeof ContextFilter>
+
   export const Agent = z
     .object({
       model: z.string().optional(),
@@ -355,11 +396,21 @@ export namespace Config {
       disable: z.boolean().optional(),
       description: z.string().optional().describe("Description of when to use the agent"),
       mode: z.union([z.literal("subagent"), z.literal("primary"), z.literal("all")]).optional(),
+      color: z
+        .string()
+        .regex(/^#[0-9a-fA-F]{6}$/, "Invalid hex color format")
+        .optional()
+        .describe("Hex color code for the agent (e.g., #FF5733)"),
+      context: ContextFilter.describe(
+        "Control what context from the parent session is passed to this subagent",
+      ),
       permission: z
         .object({
           edit: Permission.optional(),
           bash: z.union([Permission, z.record(z.string(), Permission)]).optional(),
           webfetch: Permission.optional(),
+          doom_loop: Permission.optional(),
+          external_directory: Permission.optional(),
         })
         .optional(),
     })
@@ -574,6 +625,8 @@ export namespace Config {
           edit: Permission.optional(),
           bash: z.union([Permission, z.record(z.string(), Permission)]).optional(),
           webfetch: Permission.optional(),
+          doom_loop: Permission.optional(),
+          external_directory: Permission.optional(),
         })
         .optional(),
       tools: z.record(z.string(), z.boolean()).optional(),
